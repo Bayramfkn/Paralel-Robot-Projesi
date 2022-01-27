@@ -1,0 +1,390 @@
+import numpy as np
+import math
+import cv2
+import math
+import imutils
+
+from datetime import date, datetime
+import time
+import os
+import socket
+
+DOSYA_YOLU = os.path.dirname(__file__)
+
+
+class MainWindow():
+    def __init__(self, cap):
+        ince_ayarlar = Ince_Ayarlar()
+
+        Alt_hue = int(ince_ayarlar[0]);
+        Alt_Sat = int(ince_ayarlar[1]);
+        Alt_Value = int(ince_ayarlar[2])
+        Ust_hue = int(ince_ayarlar[3]);
+        Ust_Sat = int(ince_ayarlar[4]);
+        Ust_Value = int(ince_ayarlar[5])
+
+        Alt_HSV = np.array([Alt_hue, Alt_Sat, Alt_Value]);
+        Ust_HSV = np.array([Ust_hue, Ust_Sat, Ust_Value])
+
+        Tresh_Deger = int(ince_ayarlar[6])
+        Crop_x1 = int(ince_ayarlar[7]);
+        Crop_x2 = int(ince_ayarlar[8])
+        Crop_y1 = int(ince_ayarlar[9]);
+        Crop_y2 = int(ince_ayarlar[10])
+        Kontur_Alan = int(ince_ayarlar[11])
+        Piksel2mm = float(ince_ayarlar[12])
+        Erozyon1_it = int(ince_ayarlar[19])
+        Kernel = int(ince_ayarlar[21])
+        Dilasyon_it = int(ince_ayarlar[24])
+        Erozyon2_it = int(ince_ayarlar[26])
+        Ters_Cevir = int(ince_ayarlar[28])
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        global basla, bitis
+        while True:
+            basla = datetime.now()
+            Rapor_Sil()
+
+            Fotograf = cv2.resize(cv2.cvtColor(cap.read()[1], cv2.COLOR_RGB2BGR), (640, 480))
+
+            # Fotoğraf Boyutları
+            Fotograf_Yukseklik, Fotograf_Genislik, _ = Fotograf.shape
+            Sinir_Y = Fotograf_Yukseklik / 3
+            # Gösterilecek fotoğraf
+            Fotograf_Goster = cv2.cvtColor(Fotograf, cv2.COLOR_BGR2RGB)
+
+            # Kroplanmış Fotoğraf
+            Fotograf_Crop = Fotograf[Crop_y1:Crop_y2, Crop_x1:Crop_x2]
+
+            # HSV Fotoğraf
+            Fotograf_HSV = cv2.cvtColor(Fotograf_Crop, cv2.COLOR_RGB2HSV)
+
+            # HSV ayarlanması
+            Fotograf_HSV_Ayar = cv2.inRange(Fotograf_HSV, Alt_HSV, Ust_HSV)
+
+            # HSV den renkliye dönüştürme
+            Fotograf_HSV_Renkli = cv2.cvtColor(Fotograf_HSV_Ayar, cv2.COLOR_GRAY2RGB)
+
+            # Renkli HSV yi Gri yapmak
+            Fotograh_Gri = cv2.cvtColor(Fotograf_HSV_Renkli, cv2.COLOR_RGB2GRAY)
+
+            # Siyah Beyaza Çevirme
+            if Ters_Cevir == 0:
+                Fotograf_SB = cv2.threshold(Fotograh_Gri, Tresh_Deger, 255, cv2.THRESH_BINARY)[1]
+            else:
+                Fotograf_SB = cv2.threshold(Fotograh_Gri, Tresh_Deger, 255, cv2.THRESH_BINARY_INV)[1]
+
+            Fotograf_Erozyon1 = erozyon(Fotograf_SB, Erozyon1_it, Kernel)
+            Fotograf_Dilasyon = dilasyon(Fotograf_Erozyon1, Dilasyon_it, Kernel)
+            Fotograf_Erozyon2 = erozyon(Fotograf_Dilasyon, Erozyon2_it, Kernel)
+
+            # Tespit edilen konturlar
+            konturlar = Kontur_Bul(Fotograf_Erozyon2, Crop_x1, Crop_y1)
+
+            # ORTA ÇİZGİ
+            cv2.line(Fotograf_Goster, (0, int(Sinir_Y)), (Fotograf_Genislik, int(Sinir_Y)), (0, 0, 255), 2)
+
+            # CROP İŞARETİ
+            cv2.rectangle(Fotograf_Goster, (Crop_x1, Crop_y1), (Crop_x2, Crop_y2), (0, 225, 255), 2)
+
+            # Ürün izleme algoritması (Tracking Algorithm)
+            merkez_index = 0
+            for _, kontur in enumerate(konturlar):
+                kontur_alan = cv2.contourArea(kontur)
+                if kontur_alan > Kontur_Alan:
+                    try:
+                        islem(kontur, Fotograf_Goster, Piksel2mm, merkez_index, Sinir_Y, Crop_x1)
+                        merkez_index = merkez_index + 1
+                    except Exception as Kontur_Hata:
+                        print("Kontur Hatası - " + str(Kontur_Hata))
+
+            kalibrasyon(Fotograf, Fotograf_Goster)
+
+            Fotograf_Islemli = cv2.cvtColor(Fotograf_Erozyon2, cv2.COLOR_GRAY2RGB)
+            kenar_boyu = 25
+            bosluk_Sol = np.zeros([Fotograf_Yukseklik, kenar_boyu, 3], dtype=np.uint8)
+            bosluk_Sol[:] = (0, 0, 255)
+            bosluk_Sag = np.zeros([Fotograf_Yukseklik, kenar_boyu, 3], dtype=np.uint8)
+            bosluk_Sag[:] = (0, 0, 255)
+            bosluk_Ara = np.zeros([Fotograf_Yukseklik, kenar_boyu, 3], dtype=np.uint8)
+            bosluk_Ara[:] = (0, 0, 255)
+            bosluk_Ust = np.zeros([25, (Crop_x2 - Crop_x1) + Fotograf_Genislik + bosluk_Ara.shape[1] * 3, 3],
+                                  dtype=np.uint8)
+            bosluk_Ust[:] = (0, 0, 255)
+            bosluk_Alt = np.zeros([kenar_boyu, (Crop_x2 - Crop_x1) + Fotograf_Genislik + bosluk_Ara.shape[1] * 3, 3],
+                                  dtype=np.uint8)
+            bosluk_Alt[:] = (0, 0, 255)
+            Goster = np.hstack((bosluk_Sol, Fotograf_Goster, bosluk_Ara, Fotograf_Islemli, bosluk_Sag))
+            Goster = np.vstack((bosluk_Ust, Goster, bosluk_Alt))
+            cv2.imshow("Image Processing", Goster)
+
+            del Fotograf
+            del Fotograf_Goster
+            del Fotograf_Crop
+            del Fotograf_Dilasyon
+            del Fotograf_Erozyon1
+            del Fotograf_Erozyon2
+            del Fotograf_HSV
+            del Fotograf_HSV_Ayar
+            del Fotograf_HSV_Renkli
+            del Fotograf_SB
+            del Goster
+            if cv2.waitKey(30) == 27:
+                break
+
+
+def Ince_Ayarlar():
+    config_txt = open(DOSYA_YOLU + "/resources/config.txt", "r")
+    ince_ayar = config_txt.read()
+    return ince_ayar.split()
+
+
+def erozyon(Resim, iterasyon, kernel):
+    Resim_Ero = cv2.erode(Resim, kernel=np.ones((kernel + kernel % 2 - 1, kernel + kernel % 2 - 1), np.uint8),
+                          iterations=iterasyon)
+    return Resim_Ero
+
+
+def dilasyon(Resim, iterasyon, kernel):
+    Resim_Dil = cv2.dilate(Resim, kernel=np.ones((kernel + kernel % 2 - 1, kernel + kernel % 2 - 1), np.uint8),
+                           iterations=iterasyon)
+    return Resim_Dil
+
+
+def Kontur_Bul(Resim, offset_x, offset_y):
+    konturlar = cv2.findContours(Resim, cv2.RETR_EXTERNAL,
+                                 cv2.CHAIN_APPROX_SIMPLE,
+                                 offset=(offset_x, offset_y))
+    konturlar = imutils.grab_contours(konturlar)  # konturları ihtiyacımız olan array formatına dönüştürür
+    return konturlar
+
+
+def islem(kontur, resim, gercek_mm, merkez_index, Sinir_Y, Crop_x1):
+    cv2.drawContours(resim, [kontur], 0, (0, 255, 0), 2)  # çevre konturu çizdirir
+    Koseler = Kose_Bul(kontur, resim)
+    gonderilecek_merkez_pixel = Merkez_Bul(kontur, resim)
+    gonderilecek_aci = Aci_Hesapla(Koseler)
+    if gonderilecek_merkez_pixel[1] > int(Sinir_Y):
+        if kontur_dizi[0][merkez_index] == 0:
+            kontur_dizi[0][merkez_index] = kontur_dizi[0][merkez_index] + 1
+
+        if kontur_dizi[0][merkez_index] == 1:
+            gonderilecek_merkez_pixel[0] = gonderilecek_merkez_pixel[0]
+            gonderilecek_merkez_pixel[1] = gonderilecek_merkez_pixel[1]
+
+            gonderilecek_x_mm = (gonderilecek_merkez_pixel[0] + Crop_x1) * float(gercek_mm)
+            gonderilecek_y_mm = gonderilecek_merkez_pixel[1] * float(gercek_mm)
+
+            gonderilecek_x_mm = str(int(round(gonderilecek_x_mm, 2) * 100)).rjust(5, '0')
+            gonderilecek_y_mm = str(int(round(gonderilecek_y_mm, 2) * 100)).rjust(5, '0')
+            gonderilecekVeri = Tarih_Al() + "-" + str(gonderilecek_x_mm) + "-" + str(gonderilecek_aci) + "-" + str(
+                gonderilecek_y_mm)
+
+            gonder(gonderilecekVeri)
+
+            kontur_dizi[0][merkez_index] = kontur_dizi[0][merkez_index] + 1
+
+    else:
+        kontur_dizi[0][merkez_index] = 0
+
+
+def Kose_Bul(kontur, resim):
+    Minimum_Dikdortgen = cv2.minAreaRect(kontur)  # konturun kaplamış olduğu en küçük dikdörtgen alanı verir
+    Koseler = cv2.boxPoints(Minimum_Dikdortgen)  # verilen dikdörtgen alanın köşe noktalarını bir array e atar
+    Koseler = np.int0(Koseler)  # kose noktaları int tipinde tutmamıza yarar
+    for Kose in Koseler:
+        cv2.circle(resim, (Kose[0], Kose[1]), 2, (0, 0, 255), 2)  # kose noktalara işaret nokta atar
+    cv2.line(resim, tuple(Koseler[0]), tuple(Koseler[3]), (255, 0, 0), 1)
+    cv2.line(resim, tuple(Koseler[0]), tuple(Koseler[1]), (255, 0, 0), 1)
+    cv2.line(resim, tuple(Koseler[2]), tuple(Koseler[1]), (255, 0, 0), 1)
+    cv2.line(resim, tuple(Koseler[2]), tuple(Koseler[3]), (255, 0, 0), 1)
+    return Koseler
+
+
+def Merkez_Bul(kontur, resim):  # parametre olarak contour gönderilmesi gerekmektedir.
+    M = cv2.moments(kontur)
+    try:
+        Merkez_X = int(M["m10"] / M["m00"])
+        Merkez_Y = int(M["m01"] / M["m00"])
+        cv2.circle(resim, (Merkez_X, Merkez_Y), 3, (0, 0, 255), -1)  # merkeze işaret atar
+        return [Merkez_X, Merkez_Y]
+    except Exception as Merkez_Hata:
+        print("Merkez Hatası " + "- " + str(Merkez_Hata))
+        return [Merkez_X, Merkez_Y]
+
+
+def Aci_Hesapla(Koseler):
+    try:
+        kose0 = Koseler[0]
+        kose1 = Koseler[1]
+        kose2 = Koseler[2]
+        kose3 = Koseler[3]
+
+        uzaklik01 = math.sqrt(pow((kose1[0] - kose0[0]), 2) + pow(kose1[1] - kose0[1], 2))
+        uzaklik03 = math.sqrt(pow((kose3[0] - kose0[0]), 2) + pow(kose3[1] - kose0[1], 2))
+
+        atanx = abs(kose3[0] - kose0[0])
+        atany = abs(kose3[1] - kose0[1])
+        aci = math.degrees(math.atan2(atany, atanx))
+
+        if uzaklik01 > uzaklik03:
+            aci = 90 - aci
+        else:
+            aci = 180 - aci
+
+        aci = str(int(round(aci, 2) * 100)).rjust(5, '0')
+        return aci
+    except Exception as Aci_Hata:
+        print("Açı Hatası " + "- " + str(Aci_Hata))
+
+
+def kalibrasyon(resim, resim_Goster):
+    ince_ayarlar = Ince_Ayarlar()
+    Kal_Alt_Hue = int(ince_ayarlar[13]);
+    Kal_Ust_Hue = int(ince_ayarlar[16])
+    Kal_Alt_Sat = int(ince_ayarlar[14]);
+    Kal_Ust_Sat = int(ince_ayarlar[17])
+    Kal_Alt_Val = int(ince_ayarlar[15]);
+    Kal_Ust_Val = int(ince_ayarlar[18])
+
+    Kal_Erozyon1_it = int(ince_ayarlar[20])
+    Kal_Kernel = int(ince_ayarlar[22])
+    Kal_Tresh_Deger = int(ince_ayarlar[23])
+    Kal_Dilasyon_it = int(ince_ayarlar[25])
+    Kal_Erozyon2_it = int(ince_ayarlar[27])
+
+    Kal_Alt_HSV = np.array([Kal_Alt_Hue, Kal_Alt_Sat, Kal_Alt_Val])
+    Kal_Ust_HSV = np.array([Kal_Ust_Hue, Kal_Ust_Sat, Kal_Ust_Val])
+
+    Kal_Fotograf_HSV = cv2.cvtColor(resim, cv2.COLOR_RGB2HSV)
+    Kal_Fotograf_HSV_Ayar = cv2.inRange(Kal_Fotograf_HSV, Kal_Alt_HSV, Kal_Ust_HSV)
+    Kal_Fotograf_HSV_Renkli = cv2.cvtColor(Kal_Fotograf_HSV_Ayar, cv2.COLOR_GRAY2RGB)
+
+    Kal_Fotograf_Gri = cv2.cvtColor(Kal_Fotograf_HSV_Renkli, cv2.COLOR_RGB2GRAY)
+
+    Kal_Fotograf_SB = cv2.threshold(Kal_Fotograf_Gri, Kal_Tresh_Deger, 255, cv2.THRESH_BINARY)[1]
+
+    Kal_Fotograf_Erozyon1 = erozyon(Kal_Fotograf_SB, Kal_Erozyon1_it, Kal_Kernel)
+    Kal_Fotograf_Dilasyon = dilasyon(Kal_Fotograf_Erozyon1, Kal_Dilasyon_it, Kal_Kernel)
+    Kal_Fotograf_Erozyon2 = erozyon(Kal_Fotograf_Dilasyon, Kal_Erozyon2_it, Kal_Kernel)
+
+    Kal_Konturlar = cv2.findContours(Kal_Fotograf_Erozyon2, cv2.RETR_TREE,
+                                     cv2.CHAIN_APPROX_SIMPLE)
+
+    # konturları ihtiyacımız olan array formatına dönüştürür
+    Kal_Konturlar = imutils.grab_contours(Kal_Konturlar)
+
+    try:
+        Kal_Nokta_0 = Merkez_Bul(Kal_Konturlar[0], resim_Goster)
+        Kal_Nokta_1 = Merkez_Bul(Kal_Konturlar[1], resim_Goster)
+        cv2.line(resim_Goster, tuple(Kal_Nokta_0), tuple(Kal_Nokta_1), (0, 255, 255), 2)
+        Kal_karsi = abs(Kal_Nokta_0[1] - Kal_Nokta_1[1])
+        Kal_komsu = abs(Kal_Nokta_0[0] - Kal_Nokta_1[0])
+        Kal_aci = (math.degrees(math.atan2(Kal_karsi, Kal_komsu)))
+        Kal_aci = str(int(round(Kal_aci, 2) * 100)).rjust(5, '0')
+    except Exception as Kalibre_Hata:
+        pass
+
+    del Kal_Fotograf_HSV
+    del Kal_Fotograf_HSV_Ayar
+    del Kal_Fotograf_HSV_Renkli
+    del Kal_Fotograf_Gri
+    del Kal_Fotograf_SB
+    del Kal_Fotograf_Erozyon1
+    del Kal_Fotograf_Dilasyon
+    del Kal_Fotograf_Erozyon2
+
+
+def Tarih_Al():
+    Y = str(datetime.now().strftime("%Y"))
+    M = str(datetime.now().strftime("%m"))
+    D = str(datetime.now().strftime("%d"))
+    H = str(datetime.now().strftime("%H"))
+    MN = str(datetime.now().strftime("%M"))
+    SC = str(datetime.now().strftime("%S"))
+    MS = str(datetime.now().strftime("%f"))
+    tarih = Y + M + D + "-" + H + MN + SC + "." + MS
+    return tarih
+
+
+def gonder(gonderilecekVeri):
+    PORT = 2000
+    FORMAT = "utf-8"
+    PLC = "192.168.0.20"
+    SERVER = PLC
+    ADDR = (SERVER, PORT)
+    jetson = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    jetson.settimeout(0.01)
+    message = gonderilecekVeri.encode(FORMAT)
+    print(datetime.now() - basla)
+    try:
+        jetson.close()
+        PORT = 2000
+        FORMAT = "utf-8"
+        PLC = "192.168.0.20"
+        SERVER = PLC
+        ADDR = (SERVER, PORT)
+        jetson = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        jetson.settimeout(0.01)
+    except Exception as Baglanti_Hata:
+        message = str(message) + " - Rapor Hatası1 - " + str(Baglanti_Hata)
+        print(message)
+    try:
+        jetson.connect(ADDR)
+        try:
+            jetson.send(message)
+            print(gonderilecekVeri)
+            try:
+                Rapor_Yaz(message)
+            except Exception as Rapor_Hata:
+                message = str(message) + " - Rapor Hatası1 - " + str(Rapor_Hata)
+                print(message)
+        except Exception as Gonderme_Hata:
+            message = str(message) + " - Gönderme Hatası1 - " + str(Gonderme_Hata)
+            print(message)
+            Rapor_Yaz(message)
+    except Exception as Baglanti_Hata:
+        message = str(message) + " - Bağlantı Hatası2 - " + str(Baglanti_Hata)
+        print(message)
+        Rapor_Yaz(message)
+
+
+def Rapor_Yaz(message):
+    Bugun = datetime.now()
+    Bugun = str(Bugun)
+    Bugun = Bugun.split()
+    Bugun = Bugun[0].split("-")
+    Bugun = Bugun[0] + "-" + Bugun[1] + "-" + Bugun[2]
+    Bugun = datetime.strptime(Bugun, '%Y-%m-%d').date()
+    Bugun = str(Bugun)
+    os.makedirs(DOSYA_YOLU + "/resources/tarihVeri", exist_ok=1)
+    Rapor = open(DOSYA_YOLU + "/resources/tarihVeri/" + Bugun + ".txt", "a")
+    Rapor.write(str(message) + "\n")
+    Rapor.close()
+
+
+def Rapor_Sil():
+    if os.path.exists(DOSYA_YOLU + "/resources/tarihVeri/"):
+        Bugun = datetime.now()
+        Bugun = str(Bugun)
+        Bugun = Bugun.split()
+        Bugun = Bugun[0].split("-")
+        Bugun = Bugun[0] + "-" + Bugun[1] + "-" + Bugun[2]
+        Bugun = datetime.strptime(Bugun, '%Y-%m-%d').date()
+        Raporlar = os.listdir(DOSYA_YOLU + "/resources/tarihVeri/")
+        for Rapor in Raporlar:
+            Rapor = str(Rapor).split(".")
+            Rapor = str(Rapor[0]).split("-")
+            Rapor = Rapor[0] + "-" + Rapor[1] + "-" + Rapor[2]
+            Rapor = datetime.strptime(Rapor, '%Y-%m-%d').date()
+            Fark = int(str(Bugun - Rapor).split()[0].split(":")[0])
+            if Fark > 7:
+                if os.path.exists((DOSYA_YOLU + "/resources/tarihVeri/" + str(Rapor) + ".txt")):
+                    os.remove(DOSYA_YOLU + "/resources/tarihVeri/" + str(Rapor) + ".txt")
+
+
+if __name__ == "__main__":
+    kontur_dizi = np.zeros((1, 100))
+    Rapor_Sil()
+    MainWindow(cv2.VideoCapture(1, cv2.CAP_DSHOW))
